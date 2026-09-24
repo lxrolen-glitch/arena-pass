@@ -105,7 +105,9 @@ export function PokerTable({
 
           {!showOutcome && !table.handActive && !snapshot.started && (
             <p className="max-w-xs text-xs text-slate-200/80">
-              Waiting for the host to deal the first hand.
+              {table.handNumber === 0
+                ? "Waiting for the host to deal the first hand."
+                : "Waiting for the next hand."}
             </p>
           )}
 

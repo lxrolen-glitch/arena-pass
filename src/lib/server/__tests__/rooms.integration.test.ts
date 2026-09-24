@@ -4,7 +4,7 @@ import { io as ioClient, type Socket } from "socket.io-client";
 import { Server as IOServer } from "socket.io";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-import type { PlayerAction } from "../../poker/game";
+import type { PlayerAction, TableSettings } from "../../poker/game";
 import type {
   ClientToServerEvents,
   JoinResult,
@@ -18,6 +18,7 @@ type ClientSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
 let httpServer: HttpServer;
 let io: IOServer<ClientToServerEvents, ServerToClientEvents>;
+let manager: RoomManager;
 let url = "";
 
 const clients: ClientSocket[] = [];
@@ -25,7 +26,7 @@ const latest = new Map<ClientSocket, RoomSnapshot>();
 const privateCards = new Map<ClientSocket, YouInfo | null>();
 
 beforeAll(async () => {
-  const manager = new RoomManager();
+  manager = new RoomManager();
   httpServer = createServer();
   io = new IOServer<ClientToServerEvents, ServerToClientEvents>(httpServer);
   manager.attach(io);
@@ -73,11 +74,18 @@ const joinRoom = (socket: ClientSocket, code: string, name: string, seat?: numbe
 const subscribeRoom = (socket: ClientSocket, code: string, playerId?: string | null) =>
   callAck((done) => socket.emit("room:subscribe", { code, playerId }, done));
 const startGame = (socket: ClientSocket) => callAck((done) => socket.emit("game:start", done));
+const setPaused = (socket: ClientSocket, paused: boolean) =>
+  callAck((done) => socket.emit("game:pause", { paused }, done));
 const sendAction = (socket: ClientSocket, action: PlayerAction, amount?: number) =>
   callAck((done) => socket.emit("player:action", { action, amount }, done));
 const sendChat = (socket: ClientSocket, text: string) =>
   callAck((done) => socket.emit("chat:send", { text }, done));
 const standUp = (socket: ClientSocket) => callAck((done) => socket.emit("player:standup", done));
+const sitOut = (socket: ClientSocket, sittingOut: boolean) =>
+  callAck((done) => socket.emit("player:sitout", { sittingOut }, done));
+const rebuy = (socket: ClientSocket) => callAck((done) => socket.emit("player:rebuy", done));
+const updateSettings = (socket: ClientSocket, settings: Partial<TableSettings>) =>
+  callAck((done) => socket.emit("game:settings", { settings }, done));
 
 async function poll<T>(read: () => T | undefined, predicate: (value: T) => boolean, label: string) {
   const deadline = Date.now() + 8000;
@@ -254,6 +262,137 @@ describe("room lifecycle over a real socket connection", () => {
     expect(left.ok).toBe(true);
     expect(left.snapshot?.table.players.map((player) => player.name)).toEqual(["Alice"]);
     expect(left.you).toBeNull();
+  });
+
+  it("deals on request and only pauses when the host says so", async () => {
+    const host = await connect();
+    const guest = await connect();
+    const created = await createRoom(host, "Alice");
+    const joined = await joinRoom(guest, created.code!, "Bob");
+
+    await startGame(host);
+    const first = await waitFor(host, (s) => s.table.handActive, "the first hand");
+    expect(first.table.handNumber).toBe(1);
+    expect(first.started).toBe(true);
+
+    // Pressing "deal" while a hand runs is refused, and never pauses the table.
+    const tooEarly = await startGame(host);
+    expect(tooEarly.ok).toBe(false);
+    expect(tooEarly.error).toMatch(/in progress/i);
+
+    await playHand(
+      [
+        { socket: host, id: created.playerId! },
+        { socket: guest, id: joined.playerId! },
+      ],
+      host,
+    );
+
+    const paused = await setPaused(host, true);
+    expect(paused.ok).toBe(true);
+    expect(paused.snapshot?.started).toBe(false);
+
+    // While paused nothing is dealt automatically.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(latest.get(host)!.table.handActive).toBe(false);
+
+    const dealt = await startGame(host);
+    expect(dealt.ok).toBe(true);
+    const second = await waitFor(host, (s) => s.table.handActive, "a hand dealt by hand");
+    expect(second.table.handNumber).toBe(2);
+    expect(second.started).toBe(true);
+
+    const refused = await setPaused(guest, true);
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toMatch(/host/i);
+  });
+
+  it("lets a player sit out and come back without losing the seat", async () => {
+    const host = await connect();
+    const guest = await connect();
+    const third = await connect();
+    const created = await createRoom(host, "Alice");
+    const code = created.code!;
+    const joined = await joinRoom(guest, code, "Bob");
+    await joinRoom(third, code, "Carol");
+
+    const out = await sitOut(guest, true);
+    expect(out.ok).toBe(true);
+    expect(out.you?.playerId).toBe(joined.playerId);
+    const sittingOut = await waitFor(
+      guest,
+      (snapshot) => snapshot.table.players.some((player) => player.sittingOut),
+      "a sitting-out player",
+    );
+    const bob = sittingOut.table.players.find((player) => player.id === joined.playerId)!;
+    expect(bob.sittingOut).toBe(true);
+    expect(bob.seat).toBe(joined.you!.seat);
+
+    // The other two still get dealt in; the sitting-out player is skipped.
+    await startGame(host);
+    const live = await waitFor(host, (snapshot) => snapshot.table.handActive, "a live hand");
+    expect(live.table.players.find((player) => player.id === joined.playerId)!.inHand).toBe(false);
+    expect(live.table.players.filter((player) => player.inHand)).toHaveLength(2);
+
+    const back = await sitOut(guest, false);
+    expect(back.ok).toBe(true);
+    expect(
+      back.snapshot?.table.players.find((player) => player.id === joined.playerId)?.sittingOut,
+    ).toBe(false);
+    expect(back.snapshot?.table.players).toHaveLength(3);
+  });
+
+  it("tops a busted player back up with a rebuy", async () => {
+    const host = await connect();
+    const guest = await connect();
+    const created = await createRoom(host, "Alice");
+    const code = created.code!;
+    const joined = await joinRoom(guest, code, "Bob");
+    const playerId = joined.playerId!;
+
+    const seatWithChips = await rebuy(guest);
+    expect(seatWithChips.ok).toBe(false);
+    expect(seatWithChips.error).toMatch(/chips/i);
+
+    // Play money: bust the stack directly rather than grinding a hand out.
+    const room = manager.getRoom(code)!;
+    room.table.getPlayer(playerId)!.chips = 0;
+    room.table.setSittingOut(playerId, true);
+
+    const topped = await rebuy(guest);
+    expect(topped.ok).toBe(true);
+    const bob = topped.snapshot?.table.players.find((player) => player.id === playerId)!;
+    expect(bob.chips).toBe(topped.snapshot!.table.settings.startingChips);
+    expect(bob.sittingOut).toBe(false);
+  });
+
+  it("keeps the other settings when the host only changes the turn clock", async () => {
+    const host = await connect();
+    const guest = await connect();
+    const created = await createRoom(host, "Alice");
+    await joinRoom(guest, created.code!, "Bob");
+
+    const before = created.snapshot!.table.settings;
+    const changed = await updateSettings(host, { turnSeconds: 15 });
+    expect(changed.ok).toBe(true);
+    const after = changed.snapshot!.table.settings;
+    expect(after.turnSeconds).toBe(15);
+    expect(after.smallBlind).toBe(before.smallBlind);
+    expect(after.bigBlind).toBe(before.bigBlind);
+    expect(after.startingChips).toBe(before.startingChips);
+
+    const raised = await updateSettings(host, { smallBlind: 50, bigBlind: 100, startingChips: 5000 });
+    expect(raised.ok).toBe(true);
+    expect(raised.snapshot!.table.settings).toMatchObject({
+      smallBlind: 50,
+      bigBlind: 100,
+      startingChips: 5000,
+      turnSeconds: 15,
+    });
+
+    const refused = await updateSettings(guest, { smallBlind: 1 });
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toMatch(/host/i);
   });
 
   it("refuses an action from a player who is not seated", async () => {

@@ -94,6 +94,7 @@ export class RoomManager {
     );
     socket.on("room:leave", () => this.leave(socket));
     socket.on("game:start", (ack) => ack(this.startGame(socket)));
+    socket.on("game:pause", (payload, ack) => ack(this.setPaused(socket, payload?.paused)));
     socket.on("game:settings", (payload, ack) => ack(this.updateSettings(socket, payload?.settings)));
     socket.on("player:action", (payload, ack) => ack(this.act(socket, payload?.action, payload?.amount)));
     socket.on("player:rebuy", (ack) => ack(this.rebuy(socket)));
@@ -278,23 +279,36 @@ export class RoomManager {
     if (!playerId) return { ok: false, error: "Only seated players can start the game" };
     if (room.hostId !== playerId) return { ok: false, error: "Only the host can start the game" };
 
-    // Pressing it again while idle pauses the table.
-    if (room.started && !room.table.handActive) {
-      room.started = false;
-      room.waitingAnnounced = false;
-      if (room.nextHandTimer) {
-        clearTimeout(room.nextHandTimer);
-        room.nextHandTimer = null;
-      }
-      this.pushChat(room, `${socket.data.name} paused the table`, null, true);
-      this.broadcast(room);
-      return this.ackFor(socket, room);
-    }
+    if (room.table.handActive) return { ok: false, error: "A hand is already in progress" };
 
     const result = room.table.startHand();
     if (!result.ok) return { ok: false, error: result.error };
+    // Dealing a hand also switches the automatic dealer on.
     room.started = true;
     room.waitingAnnounced = false;
+    this.broadcast(room);
+    this.afterStateChange(room);
+    return this.ackFor(socket, room);
+  }
+
+  /** Host: stop (or restart) the automatic dealer between hands. */
+  private setPaused(socket: TypedSocket, paused?: boolean): JoinResult {
+    const room = this.roomFor(socket);
+    if (!room) return { ok: false, error: "Not in a table" };
+    const playerId = socket.data.playerId as string | null;
+    if (!playerId) return { ok: false, error: "Only seated players can pause the table" };
+    if (room.hostId !== playerId) return { ok: false, error: "Only the host can pause the table" };
+
+    const next = Boolean(paused);
+    if (room.started === !next) return this.ackFor(socket, room);
+
+    room.started = !next;
+    room.waitingAnnounced = false;
+    if (room.nextHandTimer) {
+      clearTimeout(room.nextHandTimer);
+      room.nextHandTimer = null;
+    }
+    this.pushChat(room, `${socket.data.name} ${next ? "paused" : "resumed"} the table`, null, true);
     this.broadcast(room);
     this.afterStateChange(room);
     return this.ackFor(socket, room);
@@ -313,15 +327,29 @@ export class RoomManager {
       return Math.min(max, Math.max(min, parsed));
     };
 
-    settings.smallBlind = clamp(raw.smallBlind, 1, 5000, settings.smallBlind);
-    settings.bigBlind = clamp(raw.bigBlind, settings.smallBlind * 2, settings.smallBlind * 10, settings.smallBlind * 2);
-    settings.startingChips = clamp(raw.startingChips, settings.bigBlind * 10, settings.bigBlind * 500, settings.startingChips);
+    // A partial update (say, only the turn clock) keeps every field it does not
+    // mention, but still re-clamps them against the new blind level.
+    const smallBlind = clamp(raw.smallBlind, 1, 5000, settings.smallBlind);
+    const bigBlind = clamp(raw.bigBlind, smallBlind * 2, smallBlind * 10, settings.bigBlind);
+    const startingChips = clamp(
+      raw.startingChips,
+      bigBlind * 10,
+      bigBlind * 500,
+      settings.startingChips,
+    );
+
+    settings.smallBlind = smallBlind;
+    settings.bigBlind = bigBlind;
+    settings.startingChips = startingChips;
     settings.turnSeconds = clamp(raw.turnSeconds, 10, 120, settings.turnSeconds);
 
     for (const player of room.table.players) {
       if (player.chips === 0) player.chips = settings.startingChips;
     }
-    room.table.pushLog("system", `Blinds set to ${settings.smallBlind}/${settings.bigBlind}`);
+    room.table.pushLog(
+      "system",
+      `Blinds ${settings.smallBlind}/${settings.bigBlind} • ${settings.turnSeconds}s clock • stack ${settings.startingChips}`,
+    );
     this.broadcast(room);
     return this.ackFor(socket, room);
   }

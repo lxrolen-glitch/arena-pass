@@ -46,6 +46,10 @@ Environment variables (all optional): `PORT` (default `3000`), `HOST` (default `
 3. **The host presses Start.** Blinds are posted, hole cards are dealt, and the action clock
    (30s by default) starts for the first player.
 4. Hands continue automatically; the button moves clockwise and busted players can rebuy.
+   The host can also **⏸ Pause** the automatic dealer and deal each hand by hand
+   (**▶ Deal next hand**), or pick from four blind levels and four clocks in **⚙ Settings**.
+   Any player can **Sit out** (skipping the hands without giving up the seat) and come back
+   with **I'm back**.
 5. Refreshing the page, or losing the connection, keeps your seat for a few minutes — the seat
    id lives in `localStorage` and is silently reclaimed on reconnect.
 
@@ -59,7 +63,8 @@ Environment variables (all optional): `PORT` (default `3000`), `HOST` (default `
 - 7-card hand evaluation (best 5 of 7) with full tiebreakers, including the wheel straight.
 - Action clock with auto-check/auto-fold, and players who leave mid-hand fold and keep their
   committed chips in the pot.
-- Live table feed (game events + chat), spectators, sitting out, rebuys, host-controlled blinds.
+- Live table feed (game events + chat), spectators, sitting out / coming back, rebuys and
+  top-ups, host controls (start, pause the auto-dealer, blinds, action clock).
 
 ## Architecture
 
@@ -102,7 +107,8 @@ npm test
   split pots, side pots with an all-in short stack, seating and leaving mid-hand.
 - `rooms.integration.test.ts` — spins up a real Socket.IO server and drives it with real
   clients: room creation, joining, dealing a full hand, hole-card privacy, chat, spectating,
-  reconnecting to the same seat, and standing up.
+  reconnecting to the same seat, standing up, sitting out and coming back, rebuys, dealing on
+  demand vs. pausing the auto-dealer, and partial settings updates.
 
 > Note: a custom server (required to host Socket.IO on the same port) is not supported on
 > Vercel's serverless platform. Deploy on a long-running Node host (VPS, Fly.io, Render,

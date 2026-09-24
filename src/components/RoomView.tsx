@@ -10,7 +10,11 @@ import { createSocket, type PokerSocket } from "@/hooks/useSocket";
 import { useNow } from "@/hooks/useNow";
 import { clearSeat, readName, readSeat, writeName, writeSeat } from "@/lib/client/storage";
 import { chips, useCopy } from "@/lib/client/ui";
-import { getActionOptions, type PlayerAction } from "@/lib/poker/game";
+import {
+  getActionOptions,
+  type PlayerAction,
+  type TableSettings,
+} from "@/lib/poker/game";
 import type { JoinResult, RoomSnapshot, YouInfo } from "@/lib/protocol";
 
 type Status = "connecting" | "needs-name" | "ready";
@@ -148,7 +152,7 @@ export function RoomView({ code }: { code: string }) {
   }, []);
 
   const sendSettings = useCallback(
-    (settings: { smallBlind: number; bigBlind: number; startingChips: number }) => {
+    (settings: Partial<TableSettings>) => {
       const socket = requireSocket();
       if (!socket) return;
       socket.emit("game:settings", { settings }, (result) => {
@@ -165,6 +169,17 @@ export function RoomView({ code }: { code: string }) {
       if (!result.ok && result.error) setToast(result.error);
     });
   }, [requireSocket]);
+
+  const setPaused = useCallback(
+    (paused: boolean) => {
+      const socket = requireSocket();
+      if (!socket) return;
+      socket.emit("game:pause", { paused }, (result) => {
+        if (!result.ok && result.error) setToast(result.error);
+      });
+    },
+    [requireSocket],
+  );
 
   const sendChat = useCallback(
     (text: string) => {
@@ -267,6 +282,7 @@ export function RoomView({ code }: { code: string }) {
         ? "Waiting for the host to start the game"
         : "Waiting for the next hand";
     }
+    if (myPlayer.sittingOut) return "You are sitting out — press “I'm back” to be dealt in";
     if (!myPlayer.inHand) return "You will be dealt in on the next hand";
     if (myPlayer.folded) return "You folded — waiting for the hand to finish";
     if (myPlayer.allIn) return "You are all-in — waiting for the hand to finish";
@@ -281,6 +297,17 @@ export function RoomView({ code }: { code: string }) {
       if (!result.ok && result.error) setToast(result.error);
     });
   }, [requireSocket]);
+
+  const toggleSitOut = useCallback(
+    (sittingOut: boolean) => {
+      const socket = requireSocket();
+      if (!socket) return;
+      socket.emit("player:sitout", { sittingOut }, (result) => {
+        if (!result.ok && result.error) setToast(result.error);
+      });
+    },
+    [requireSocket],
+  );
 
   const inviteUrl =
     typeof window === "undefined" ? "" : `${window.location.origin}/room/${code}`;
@@ -359,6 +386,21 @@ export function RoomView({ code }: { code: string }) {
             </button>
           )}
 
+          {you && myPlayer && (
+            <button
+              type="button"
+              className="btn-ghost !px-3 !py-1.5 text-xs"
+              title={
+                myPlayer.sittingOut
+                  ? "Resume playing — you are dealt in from the next hand"
+                  : "Skip the next hands until you are back"
+              }
+              onClick={() => toggleSitOut(!myPlayer.sittingOut)}
+            >
+              {myPlayer.sittingOut ? "I'm back" : "Sit out"}
+            </button>
+          )}
+
           {you && (
             <button
               type="button"
@@ -403,8 +445,25 @@ export function RoomView({ code }: { code: string }) {
               {preset.label}
             </button>
           ))}
+          <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
+            Turn clock
+          </span>
+          {[15, 30, 45, 60].map((seconds) => (
+            <button
+              key={seconds}
+              type="button"
+              className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                table.settings.turnSeconds === seconds
+                  ? "border-gold-400/70 bg-gold-400/10 text-gold-400"
+                  : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+              }`}
+              onClick={() => sendSettings({ turnSeconds: seconds })}
+            >
+              {seconds}s
+            </button>
+          ))}
           <span className="text-xs text-slate-500">
-            Starting stack {chips(table.settings.startingChips)} • {table.settings.turnSeconds}s per turn
+            Starting stack {chips(table.settings.startingChips)}
           </span>
         </div>
       )}
@@ -421,21 +480,42 @@ export function RoomView({ code }: { code: string }) {
             )}
 
             {isHost && snapshot && table && !table.handActive && (
-              <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
+              <div className="pointer-events-none absolute inset-x-0 bottom-3 flex flex-wrap items-center justify-center gap-2 px-3">
                 <button
                   type="button"
                   className="btn-primary pointer-events-auto animate-pop"
                   onClick={startGame}
                 >
-                  {snapshot.started ? "▶ Deal next hand" : "▶ Start game"}
+                  {snapshot.started || table.handNumber > 0 ? "▶ Deal next hand" : "▶ Start game"}
                 </button>
+                {snapshot.started ? (
+                  <button
+                    type="button"
+                    className="btn-ghost pointer-events-auto"
+                    title="Stop dealing new hands automatically"
+                    onClick={() => setPaused(true)}
+                  >
+                    ⏸ Pause
+                  </button>
+                ) : (
+                  table.handNumber > 0 && (
+                    <button
+                      type="button"
+                      className="btn-ghost pointer-events-auto"
+                      title="Deal every hand automatically again"
+                      onClick={() => setPaused(false)}
+                    >
+                      ▶ Resume auto-deal
+                    </button>
+                  )
+                )}
               </div>
             )}
 
             {snapshot && !snapshot.started && table && table.handNumber > 0 && !table.handActive && (
-              <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">
+              <div className="pointer-events-none absolute inset-x-0 bottom-14 flex justify-center">
                 <span className="rounded-full bg-black/60 px-3 py-1 text-xs text-slate-300">
-                  Waiting for the host to deal the next hand
+                  Table paused — the host deals the next hand
                 </span>
               </div>
             )}

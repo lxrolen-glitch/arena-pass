@@ -66,7 +66,10 @@ export interface ClientToServerEvents {
   "room:join": (payload: JoinRoomPayload, ack: (result: JoinResult) => void) => void;
   "room:subscribe": (payload: SubscribePayload, ack: (result: JoinResult) => void) => void;
   "room:leave": () => void;
+  /** Host: deal a hand right now. */
   "game:start": (ack: (result: JoinResult) => void) => void;
+  /** Host: pause/resume the automatic dealer for the next hands. */
+  "game:pause": (payload: { paused: boolean }, ack: (result: JoinResult) => void) => void;
   "game:settings": (
     payload: { settings: Partial<TableSettings> },
     ack: (result: JoinResult) => void,
